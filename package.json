@@ -12,7 +12,7 @@
     "start": "node dist/cli/index.js",
     "dev": "tsx src/cli/index.ts",
     "robot": "tsx src/cli/index.ts",
-    "test": "node --import tsx --test tests/smoke.test.ts tests/api.smoke.test.ts tests/tools.smoke.test.ts",
+    "test": "node --import tsx --test tests/smoke.test.ts tests/api.smoke.test.ts tests/tools.smoke.test.ts tests/tool_calls.test.ts tests/conversations.test.ts",
     "typecheck": "tsc --noEmit",
     "gui": "node scripts/gui-dev.mjs",
     "gui:build": "npm install --prefix gui && npm run build --prefix gui",

@@ -4,9 +4,12 @@ import { OllamaError, createProvider } from '../providers/ollama.js';
 import type { ChatMessage } from '../providers/types.js';
 import {
   executeBuiltinTool,
+  extractToolCallsFromContent,
   formatToolCall,
   listAvailableTools,
+  parseModelToolCalls,
   planToolsFromPrompt,
+  toOllamaTools,
   type ToolCall,
 } from '../tools/index.js';
 import { ensureWorkspace } from '../tools/sandbox.js';
@@ -40,6 +43,7 @@ export interface ToolStepMeta {
   result?: string;
   ok?: boolean;
   planned?: boolean;
+  source?: 'model' | 'heuristic';
 }
 
 export interface RunStep {
@@ -114,6 +118,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
   const toolCtx = {
     workspaceRoot,
     enableRunCommand: config.enableRunCommand,
+    commandTimeoutMs: config.runCommandTimeoutMs,
     signal: opts.signal,
   };
 
@@ -169,6 +174,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
   await mcp.connect('local-stub');
 
   const available = listAvailableTools(toolCtx);
+  const ollamaTools = toOllamaTools(toolCtx, available);
   let plannedTools = planToolsFromPrompt(prompt, toolCtx);
 
   // Write-tier skills still surface an approval gate even when the heuristic
@@ -206,7 +212,13 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
       steps,
       opts,
       'tool',
-      `Built-in tools: ${available.map((t) => t.name).join(', ') || '(none)'}`,
+      `Built-in tools (Ollama-compatible specs): ${available.map((t) => t.name).join(', ') || '(none)'}`,
+    );
+    pushStep(
+      steps,
+      opts,
+      'plan',
+      'Live mode exposes these as model tools; dry-run uses prompt heuristics only',
     );
 
     if (plannedTools.length === 0) {
@@ -229,6 +241,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
             args: call.args,
             planned: true,
             ok: false,
+            source: 'heuristic',
           });
           break;
         }
@@ -237,6 +250,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
         name: call.name,
         args: call.args,
         planned: true,
+        source: 'heuristic',
       });
     }
 
@@ -248,7 +262,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
     return { steps, summary };
   }
 
-  // Live path — call Ollama with history, then execute planned tools with approvals
+  // ── Live agent loop: model tool-calling with heuristic fallback ──────────
   const system = buildSystemPrompt(skill, workspaceRoot, available.map((t) => t.name));
   const messages: ChatMessage[] = [
     { role: 'system', content: system },
@@ -261,23 +275,126 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
 
   let replyContent = '';
   let replyModel = config.model;
+  let modelToolRounds = 0;
+  let executedFromModel = 0;
+  let usedHeuristicFallback = false;
+
   try {
-    const chatStream = provider.chatStream?.bind(provider);
-    if (chatStream) {
-      const result = await chatStream(messages, {
+    const maxRounds = config.maxToolRounds ?? 4;
+    for (let round = 0; round < maxRounds; round++) {
+      if (opts.signal?.aborted) break;
+      if (steps.length >= maxSteps + 20) break;
+
+      pushStep(
+        steps,
+        opts,
+        'plan',
+        round === 0
+          ? `Calling ${config.provider} with ${ollamaTools.length} tool(s) (round 1/${maxRounds})`
+          : `Tool follow-up round ${round + 1}/${maxRounds}`,
+      );
+
+      const result = await provider.chat(messages, {
+        tools: ollamaTools.length ? ollamaTools : undefined,
+        stream: false,
         signal: opts.signal,
-        onToken: (text) => {
-          replyContent += text;
-          emit(opts, { type: 'token', text });
-        },
       });
-      replyContent = result.content;
       replyModel = result.model;
-    } else {
-      const result = await provider.chat(messages, { signal: opts.signal });
-      replyContent = result.content;
-      replyModel = result.model;
-      emit(opts, { type: 'token', text: result.content });
+
+      let calls = parseModelToolCalls(result.toolCalls);
+      if (calls.length === 0 && result.content) {
+        calls = extractToolCallsFromContent(result.content);
+      }
+
+      // Filter to known/enabled tools
+      const enabled = new Set(available.map((t) => t.name));
+      calls = calls.filter((c) => enabled.has(c.name));
+
+      if (calls.length > 0) {
+        modelToolRounds += 1;
+        messages.push({
+          role: 'assistant',
+          content: result.content || '',
+          tool_calls: result.toolCalls?.length
+            ? result.toolCalls
+            : calls.map((c) => ({
+                type: 'function',
+                function: { name: c.name, arguments: c.args },
+              })),
+        });
+
+        pushStep(
+          steps,
+          opts,
+          'provider',
+          result.content?.trim()
+            ? result.content
+            : `Model requested ${calls.length} tool call(s)`,
+        );
+
+        for (const call of calls) {
+          if (steps.length >= maxSteps + 20) break;
+          const label = formatToolCall(call);
+          pushStep(steps, opts, 'tool', `Call: ${label}`, {
+            name: call.name,
+            args: call.args,
+            planned: false,
+            source: 'model',
+          });
+
+          if (call.tier === 'write' || call.tier === 'destructive') {
+            const decision = await gateWithEvents(config, opts, {
+              action: call.name,
+              tier: call.tier,
+              detail: label,
+            });
+            pushStep(steps, opts, 'approval', decision.reason);
+            if (!decision.allowed) {
+              const denied = `Not executed: ${decision.reason}`;
+              pushStep(steps, opts, 'tool_result', denied, {
+                name: call.name,
+                args: call.args,
+                ok: false,
+                result: denied,
+                source: 'model',
+              });
+              messages.push({
+                role: 'tool',
+                tool_name: call.name,
+                content: denied,
+              });
+              continue;
+            }
+          }
+
+          const toolResult = await executeBuiltinTool(call, toolCtx);
+          executedFromModel += 1;
+          pushStep(steps, opts, 'tool_result', truncate(toolResult.content, 1200), {
+            name: call.name,
+            args: call.args,
+            ok: toolResult.ok,
+            result: toolResult.content,
+            source: 'model',
+          });
+          messages.push({
+            role: 'tool',
+            tool_name: call.name,
+            content: truncate(toolResult.content, 8000),
+          });
+        }
+        continue; // next model round with tool results
+      }
+
+      // Final natural-language answer (no tool calls this round)
+      replyContent = result.content || '';
+      if (replyContent) {
+        emit(opts, { type: 'token', text: replyContent });
+        pushStep(steps, opts, 'provider', replyContent);
+      } else {
+        pushStep(steps, opts, 'provider', '(empty model content)');
+      }
+      messages.push({ role: 'assistant', content: replyContent });
+      break;
     }
   } catch (err) {
     const message =
@@ -291,74 +408,77 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
     throw new Error(message);
   }
 
-  pushStep(steps, opts, 'provider', replyContent);
-
-  // Execute planned built-in tools (heuristic) after the model reply
-  const toolResults: string[] = [];
-  for (const call of plannedTools) {
-    if (steps.length >= maxSteps + 10) break;
-    const label = formatToolCall(call);
-    pushStep(steps, opts, 'tool', `Call: ${label}`, {
-      name: call.name,
-      args: call.args,
-      planned: false,
-    });
-
-    if (call.tier === 'write' || call.tier === 'destructive') {
-      const decision = await gateWithEvents(config, opts, {
-        action: call.name,
-        tier: call.tier,
-        detail: label,
-      });
-      pushStep(steps, opts, 'approval', decision.reason);
-      if (!decision.allowed) {
-        pushStep(steps, opts, 'tool_result', `Not executed: ${decision.reason}`, {
-          name: call.name,
-          args: call.args,
-          ok: false,
-          result: decision.reason,
-        });
-        continue;
-      }
-    }
-
-    const result = await executeBuiltinTool(call, toolCtx);
-    toolResults.push(result.content);
+  // Heuristic fallback when the model never returned tool_calls
+  if (executedFromModel === 0 && plannedTools.length > 0 && !opts.signal?.aborted) {
+    usedHeuristicFallback = true;
     pushStep(
       steps,
       opts,
-      'tool_result',
-      truncate(result.content, 1200),
-      {
+      'plan',
+      'No model tool_calls — falling back to prompt-heuristic tool plan',
+    );
+
+    const toolResults: string[] = [];
+    for (const call of plannedTools) {
+      if (steps.length >= maxSteps + 10) break;
+      const label = formatToolCall(call);
+      pushStep(steps, opts, 'tool', `Call: ${label}`, {
+        name: call.name,
+        args: call.args,
+        planned: false,
+        source: 'heuristic',
+      });
+
+      if (call.tier === 'write' || call.tier === 'destructive') {
+        const decision = await gateWithEvents(config, opts, {
+          action: call.name,
+          tier: call.tier,
+          detail: label,
+        });
+        pushStep(steps, opts, 'approval', decision.reason);
+        if (!decision.allowed) {
+          pushStep(steps, opts, 'tool_result', `Not executed: ${decision.reason}`, {
+            name: call.name,
+            args: call.args,
+            ok: false,
+            result: decision.reason,
+            source: 'heuristic',
+          });
+          continue;
+        }
+      }
+
+      const result = await executeBuiltinTool(call, toolCtx);
+      toolResults.push(result.content);
+      pushStep(steps, opts, 'tool_result', truncate(result.content, 1200), {
         name: call.name,
         args: call.args,
         ok: result.ok,
         result: result.content,
-      },
-    );
-  }
+        source: 'heuristic',
+      });
+    }
 
-  // If tools ran, optionally ask the model to incorporate results (best-effort; skip if aborted)
-  if (toolResults.length > 0 && !opts.signal?.aborted) {
-    try {
-      const followUp = await provider.chat(
-        [
-          ...messages,
-          { role: 'assistant', content: replyContent },
-          {
-            role: 'user',
-            content: `Tool results:\n\n${toolResults.map((t) => truncate(t, 2000)).join('\n\n---\n\n')}\n\nBriefly incorporate these into your answer for the user.`,
-          },
-        ],
-        { signal: opts.signal },
-      );
-      if (followUp.content.trim()) {
-        replyContent = followUp.content;
-        emit(opts, { type: 'token', text: `\n\n${followUp.content}` });
-        pushStep(steps, opts, 'provider', followUp.content);
+    if (toolResults.length > 0 && !opts.signal?.aborted) {
+      try {
+        const followUp = await provider.chat(
+          [
+            ...messages,
+            {
+              role: 'user',
+              content: `Tool results:\n\n${toolResults.map((t) => truncate(t, 2000)).join('\n\n---\n\n')}\n\nBriefly incorporate these into your answer for the user.`,
+            },
+          ],
+          { signal: opts.signal, stream: false },
+        );
+        if (followUp.content.trim()) {
+          replyContent = followUp.content;
+          emit(opts, { type: 'token', text: `\n\n${followUp.content}` });
+          pushStep(steps, opts, 'provider', followUp.content);
+        }
+      } catch {
+        // Tool results already in activity; follow-up is optional
       }
-    } catch {
-      // Tool results already in activity; follow-up is optional
     }
   }
 
@@ -373,7 +493,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
   );
 
   await mcp.disconnect();
-  const summary = `Session complete. model=${replyModel} tools=${plannedTools.length} history=${history.length}`;
+  const summary = `Session complete. model=${replyModel} tool_rounds=${modelToolRounds} model_tools=${executedFromModel} heuristic=${usedHeuristicFallback ? 'yes' : 'no'} history=${history.length}`;
   emit(opts, { type: 'done', summary, steps });
   return { steps, summary };
 }
@@ -407,9 +527,10 @@ function buildSystemPrompt(
     'You are The Robot, a careful local offline agent.',
     `Workspace root (sandboxed tools): ${workspaceRoot}`,
     toolNames.length
-      ? `Built-in tools available via the runtime: ${toolNames.join(', ')}.`
+      ? `You have function tools: ${toolNames.join(', ')}. Call them when you need filesystem or command results. Prefer tools over guessing file contents.`
       : 'No built-in tools enabled.',
     'Respect prior conversation turns when answering.',
+    'After tool results arrive, give a concise final answer to the user.',
   ];
   if (skill) {
     lines.push(`Follow skill "${skill.meta.name}":\n${skill.body}`);

@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +22,12 @@ export interface RobotConfig {
   enableRunCommand: boolean;
   /** Max prior chat turns (user+assistant pairs roughly) sent to the provider. */
   maxHistoryMessages: number;
+  /** Max model↔tool rounds in a live session. */
+  maxToolRounds: number;
+  /** Timeout for run_command (ms). */
+  runCommandTimeoutMs: number;
+  /** Persistent data dir (conversations, etc.). */
+  dataDir: string;
 }
 
 function approvalMode(raw: string | undefined): ApprovalMode {
@@ -31,6 +38,12 @@ function approvalMode(raw: string | undefined): ApprovalMode {
 function truthy(raw: string | undefined): boolean {
   if (!raw) return false;
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
+function intEnv(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
 export function loadConfig(overrides: Partial<RobotConfig> = {}): RobotConfig {
@@ -45,6 +58,11 @@ export function loadConfig(overrides: Partial<RobotConfig> = {}): RobotConfig {
     workspaceRoot: process.env.ROBOT_WORKSPACE ?? process.cwd(),
     enableRunCommand: truthy(process.env.ROBOT_ENABLE_RUN_COMMAND),
     maxHistoryMessages: 24,
+    maxToolRounds: intEnv(process.env.ROBOT_MAX_TOOL_ROUNDS, 4),
+    runCommandTimeoutMs: intEnv(process.env.ROBOT_RUN_COMMAND_TIMEOUT_MS, 15_000),
+    dataDir: process.env.ROBOT_DATA_DIR?.trim()
+      ? path.resolve(process.env.ROBOT_DATA_DIR.trim())
+      : path.join(os.homedir(), '.the-robot'),
     ...overrides,
   };
 }

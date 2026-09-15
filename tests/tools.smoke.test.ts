@@ -135,6 +135,7 @@ describe('Built-in tools + history', () => {
       if (url.includes('/api/chat')) {
         const body = JSON.parse(String(init?.body ?? '{}')) as {
           messages?: Array<{ role: string; content: string }>;
+          stream?: boolean;
         };
         const msgs = body.messages ?? [];
         const hasHistory = msgs.some((m) => m.content.includes('Orchid'));
@@ -144,6 +145,17 @@ describe('Built-in tools + history', () => {
           : hasHistory
             ? 'Orchid notes listing coming up.'
             : 'Working on it.';
+        // Agent loop uses non-streaming chat for tool rounds
+        if (body.stream === false) {
+          return new Response(
+            JSON.stringify({
+              model: 'llama3.2',
+              message: { role: 'assistant', content },
+              done: true,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
         const payload = `${JSON.stringify({ message: { content }, done: false })}\n${JSON.stringify({
           message: { content: '' },
           done: true,

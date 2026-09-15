@@ -45,11 +45,15 @@ routines/        Example schedule / trigger configs
 1. Load config (env + defaults), including `ROBOT_WORKSPACE` sandbox root.
 2. Resolve skills, optional routine context, and normalize conversation `history`.
 3. If dry-run: plan steps + built-in tool calls (no side effects), honor approvals, exit.
-4. Else: call Ollama `/api/chat` with history (streaming when hooked), execute sandboxed built-in tools after approvals, keep MCP as an extension stub.
+4. Else: call Ollama `/api/chat` with history **and tool specs**; when the model returns `tool_calls`, execute sandboxed tools (approvals), append `role:tool` results, and loop (up to `maxToolRounds`). If no tool_calls, fall back to the prompt heuristic. MCP remains an extension stub.
 
 ### Built-in tools
 
-`src/tools/` implements `list_dir`, `read_file`, `write_file`, and optional `run_command`. All file paths resolve under `workspaceRoot` and reject `..` escapes. The runtime uses a prompt heuristic to plan tool calls; write/destructive tiers go through the approval gate.
+`src/tools/` implements `list_dir`, `read_file`, `write_file`, and optional `run_command`. All file paths resolve under `workspaceRoot` and reject `..` escapes. Tool schemas (`schema.ts`) are exposed to Ollama; `parseModelToolCalls` turns model responses into runtime calls. `run_command` is argv-only (`execFile`, no shell) and gated by `ROBOT_ENABLE_RUN_COMMAND`. Write/destructive tiers go through the approval gate.
+
+### Conversation store
+
+`src/core/conversations.ts` persists chats as JSON under `ROBOT_DATA_DIR/conversations` (default `~/.the-robot/conversations`). The API exposes CRUD at `/api/conversations`; the GUI prefers the server store and falls back to `localStorage`.
 
 ### Skills
 

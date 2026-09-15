@@ -5,6 +5,7 @@ import path from 'node:path';
 import { globalApprovalBroker } from '../approvals/broker.js';
 import type { ApprovalDecision, ApprovalRequest } from '../approvals/gate.js';
 import { loadConfig, ROOT, type RobotConfig } from '../core/config.js';
+import { getConversationStore } from '../core/conversations.js';
 import { loadRoutines } from '../core/routines.js';
 import { runSession, type SessionEvent } from '../core/runtime.js';
 import { loadSkills } from '../core/skills.js';
@@ -57,7 +58,7 @@ async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
 
 function withCors(res: http.ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -83,6 +84,8 @@ async function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse
     routinesLoaded: routines.length,
     ollama: ping,
     pendingApprovals: globalApprovalBroker.list().length,
+    dataDir: config.dataDir,
+    conversationsDir: getConversationStore(config.dataDir).dir,
   });
 }
 
@@ -231,6 +234,63 @@ async function handleApproval(req: http.IncomingMessage, res: http.ServerRespons
   sendJson(res, 200, { ok: true, id, decision });
 }
 
+
+async function handleConversationsList(
+  _req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: RobotConfig,
+): Promise<void> {
+  const store = getConversationStore(config.dataDir);
+  const conversations = await store.list();
+  sendJson(res, 200, { conversations, dir: store.dir });
+}
+
+async function handleConversationGet(
+  _req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: RobotConfig,
+  id: string,
+): Promise<void> {
+  const store = getConversationStore(config.dataDir);
+  const conversation = await store.get(id);
+  if (!conversation) {
+    sendJson(res, 404, { error: 'Conversation not found' });
+    return;
+  }
+  sendJson(res, 200, { conversation });
+}
+
+async function handleConversationUpsert(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: RobotConfig,
+): Promise<void> {
+  const body = await readJsonBody<unknown>(req);
+  try {
+    const store = getConversationStore(config.dataDir);
+    const conversation = await store.upsert(body);
+    sendJson(res, 200, { conversation });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    sendJson(res, 400, { error: message });
+  }
+}
+
+async function handleConversationDelete(
+  _req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: RobotConfig,
+  id: string,
+): Promise<void> {
+  const store = getConversationStore(config.dataDir);
+  const ok = await store.delete(id);
+  if (!ok) {
+    sendJson(res, 404, { error: 'Conversation not found' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, id });
+}
+
 async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath: string): Promise<boolean> {
   const safe = path.normalize(decodeURIComponent(urlPath.split('?')[0])).replace(/^(\.\.[/\\])+/, '');
   let filePath = path.join(staticDir, safe === '/' ? 'index.html' : safe);
@@ -313,6 +373,30 @@ export function createApiServer(options: ApiServerOptions = {}): http.Server {
       }
       if (method === 'GET' && pathname === '/api/approvals') {
         sendJson(res, 200, { pending: globalApprovalBroker.list() });
+        return;
+      }
+      if (method === 'GET' && pathname === '/api/conversations') {
+        await handleConversationsList(req, res, config);
+        return;
+      }
+      if (method === 'POST' && pathname === '/api/conversations') {
+        await handleConversationUpsert(req, res, config);
+        return;
+      }
+      if (
+        (method === 'GET' || method === 'DELETE') &&
+        pathname.startsWith('/api/conversations/')
+      ) {
+        const id = decodeURIComponent(pathname.slice('/api/conversations/'.length));
+        if (!id || id.includes('/')) {
+          sendJson(res, 400, { error: 'conversation id required' });
+          return;
+        }
+        if (method === 'GET') {
+          await handleConversationGet(req, res, config, id);
+        } else {
+          await handleConversationDelete(req, res, config, id);
+        }
         return;
       }
 

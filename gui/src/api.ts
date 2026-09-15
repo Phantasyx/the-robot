@@ -1,4 +1,11 @@
-import type { HealthInfo, RoutineInfo, RunStep, SkillInfo, StreamEvent } from './types';
+import type {
+  Conversation,
+  HealthInfo,
+  RoutineInfo,
+  RunStep,
+  SkillInfo,
+  StreamEvent,
+} from './types';
 
 async function parseJson<T>(res: Response): Promise<T> {
   const data = (await res.json()) as T & { error?: string };
@@ -51,6 +58,63 @@ export async function resolveApproval(
       body: JSON.stringify({ decision }),
     }),
   );
+}
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  updatedAt: number;
+  dryRun: boolean;
+  messageCount: number;
+  skill?: string;
+  routine?: string;
+};
+
+export async function fetchConversationList(): Promise<ConversationSummary[]> {
+  const data = await parseJson<{ conversations: ConversationSummary[] }>(
+    await fetch('/api/conversations'),
+  );
+  return data.conversations;
+}
+
+export async function fetchConversation(id: string): Promise<Conversation> {
+  const data = await parseJson<{ conversation: Conversation }>(
+    await fetch(`/api/conversations/${encodeURIComponent(id)}`),
+  );
+  return data.conversation;
+}
+
+export async function upsertConversation(conversation: Conversation): Promise<Conversation> {
+  const data = await parseJson<{ conversation: Conversation }>(
+    await fetch('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(conversation),
+    }),
+  );
+  return data.conversation;
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  await parseJson(
+    await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  );
+}
+
+/** Load all conversations from the server (list + fetch each). */
+export async function fetchAllConversations(): Promise<Conversation[]> {
+  const list = await fetchConversationList();
+  const out: Conversation[] = [];
+  for (const summary of list) {
+    try {
+      out.push(await fetchConversation(summary.id));
+    } catch {
+      /* skip missing */
+    }
+  }
+  return out;
 }
 
 /** Consume POST /api/chat/stream as SSE-style `data: {...}` lines. */

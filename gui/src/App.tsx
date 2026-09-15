@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { fetchHealth, fetchRoutines, fetchSkills, resolveApproval, streamChat } from './api';
 import { Markdown } from './Markdown';
-import { loadConversations, saveConversations, uid } from './storage';
+import { loadConversationsHybrid, persistConversations, uid, type StoreSource } from './storage';
 import type {
   ChatMessage,
   Conversation,
@@ -54,11 +54,13 @@ function buildHistory(messages: ChatMessage[]): { role: 'user' | 'assistant'; co
 function describeToolStep(s: RunStep): string {
   if (!s.tool) return s.message;
   const name = s.tool.name;
+  const src = s.tool.source === 'model' ? 'model' : s.tool.source === 'heuristic' ? 'heuristic' : '';
+  const tag = src ? ` [${src}]` : '';
   if (s.kind === 'tool_result') {
     const status = s.tool.ok === false ? 'fail' : 'ok';
-    return `${name} → ${status}: ${s.message}`;
+    return `${name}${tag} → ${status}: ${s.message}`;
   }
-  if (s.tool.planned) return `plan ${name}: ${s.message}`;
+  if (s.tool.planned) return `plan ${name}${tag}: ${s.message}`;
   return s.message;
 }
 
@@ -75,11 +77,10 @@ function createConversation(partial?: Partial<Conversation>): Conversation {
 }
 
 export default function App() {
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const loaded = loadConversations();
-    return loaded.length > 0 ? loaded : [createConversation()];
-  });
+  const [conversations, setConversations] = useState<Conversation[]>(() => [createConversation()]);
   const [activeId, setActiveId] = useState(() => conversations[0]?.id ?? '');
+  const [storeSource, setStoreSource] = useState<StoreSource>('local');
+  const [storeReady, setStoreReady] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [routines, setRoutines] = useState<RoutineInfo[]>([]);
   const [health, setHealth] = useState<HealthInfo | null>(null);
@@ -90,6 +91,8 @@ export default function App() {
   const threadRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const prevIdsRef = useRef<Set<string>>(new Set());
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? conversations[0],
@@ -105,8 +108,39 @@ export default function App() {
   }, [active?.messages]);
 
   useEffect(() => {
-    saveConversations(conversations);
-  }, [conversations]);
+    let cancelled = false;
+    void (async () => {
+      const { conversations: loaded, source } = await loadConversationsHybrid();
+      if (cancelled) return;
+      setStoreSource(source);
+      if (loaded.length > 0) {
+        setConversations(loaded);
+        setActiveId(loaded[0].id);
+        prevIdsRef.current = new Set(loaded.map((c) => c.id));
+      }
+      setStoreReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!storeReady) return;
+    if (persistTimer.current) clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(() => {
+      const prev = prevIdsRef.current;
+      void persistConversations(conversations, {
+        server: storeSource === 'server',
+        previousIds: prev,
+      }).then(() => {
+        prevIdsRef.current = new Set(conversations.map((c) => c.id));
+      });
+    }, 400);
+    return () => {
+      if (persistTimer.current) clearTimeout(persistTimer.current);
+    };
+  }, [conversations, storeReady, storeSource]);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -489,6 +523,12 @@ export default function App() {
               {health?.skillsLoaded ?? 0} skills · {health?.routinesLoaded ?? 0} routines
             </span>
           </div>
+          <div className="status-row">
+            <span>Chats</span>
+            <span title={health?.conversationsDir || undefined}>
+              {storeSource === 'server' ? 'server store' : 'localStorage'}
+            </span>
+          </div>
         </div>
       </aside>
 
@@ -715,9 +755,9 @@ export default function App() {
             {apiUp
               ? modeLive
                 ? ollamaUp
-                  ? 'Live streaming via local Ollama with conversation history + sandboxed tools. Chats stay in this browser.'
+                  ? `Live Ollama agent loop (model tools + heuristic fallback). Chats: ${storeSource === 'server' ? 'server store' : 'localStorage'}.`
                   : 'Live mode needs Ollama — doctor shows it offline. Dry-run still works fully offline.'
-                : 'Dry-run plans tools offline and keeps multi-turn context. Conversations stay in this browser (localStorage).'
+                : `Dry-run plans tools offline with multi-turn context. Chats: ${storeSource === 'server' ? 'server JSON store' : 'localStorage'}.`
               : 'Start the API with npm run gui or npm run start:gui.'}
           </div>
         </div>

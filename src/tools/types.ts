@@ -26,5 +26,7 @@ export interface ToolContext {
   enableRunCommand: boolean;
   /** Soft cap for read/list payloads. */
   maxReadBytes?: number;
+  /** Hard timeout for run_command (ms). Default 15000. */
+  commandTimeoutMs?: number;
   signal?: AbortSignal;
 }

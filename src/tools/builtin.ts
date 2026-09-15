@@ -26,7 +26,8 @@ export const BUILTIN_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'run_command',
-    description: 'Run a shell command with cwd=workspace (destructive; optional)',
+    description:
+      'Run an argv-only process with cwd=workspace (no shell). Off by default — set ROBOT_ENABLE_RUN_COMMAND=1. Prefer args.argv; command string rejects shell metacharacters. Hard timeout applies.',
     tier: 'destructive',
     optional: true,
   },
@@ -135,16 +136,28 @@ async function toolRunCommand(args: Record<string, unknown>, ctx: ToolContext): 
   if (!ctx.enableRunCommand) {
     return { ok: false, content: 'run_command disabled (set ROBOT_ENABLE_RUN_COMMAND=1)' };
   }
-  const command = asString(args.command).trim();
-  if (!command) return { ok: false, content: 'run_command requires command' };
 
-  // Prefer argv array when provided; otherwise split lightly for simple demos.
+  // Prefer argv-only. Fall back to a simple command string with no shell features.
   let file: string;
   let argv: string[];
   if (Array.isArray(args.argv) && args.argv.length > 0) {
-    file = String(args.argv[0]);
-    argv = args.argv.slice(1).map(String);
+    file = String(args.argv[0]).trim();
+    argv = args.argv.slice(1).map((a) => String(a));
   } else {
+    const command = asString(args.command).trim();
+    if (!command) {
+      return {
+        ok: false,
+        content: 'run_command requires argv (preferred) or a simple command string',
+      };
+    }
+    if (SHELL_META.test(command)) {
+      return {
+        ok: false,
+        content:
+          'run_command rejects shell metacharacters (| & ; < > $ ` ( ) { } etc). Pass argv: ["cmd","arg1",...] instead.',
+      };
+    }
     const parts = splitCommand(command);
     file = parts[0] ?? '';
     argv = parts.slice(1);
@@ -152,27 +165,57 @@ async function toolRunCommand(args: Record<string, unknown>, ctx: ToolContext): 
   if (!file) return { ok: false, content: 'empty command' };
 
   const cwd = path.resolve(ctx.workspaceRoot);
+  const timeout = ctx.commandTimeoutMs ?? 15_000;
   try {
     const { stdout, stderr } = await execFileAsync(file, argv, {
       cwd,
-      timeout: 15_000,
+      timeout,
       maxBuffer: 512_000,
-      env: { ...process.env, PWD: cwd },
+      env: sanitizeEnv(process.env, cwd),
       signal: ctx.signal,
+      // Never invoke a shell — execFile only.
+      shell: false,
     });
     const out = [stdout, stderr].filter((s) => s && s.trim()).join('\n').trim();
     return {
       ok: true,
-      content: out || `(run_command ok: ${file} ${argv.join(' ')})`,
+      content: out || `(run_command ok: ${file}${argv.length ? ' ' + argv.join(' ') : ''})`,
     };
   } catch (err) {
-    const e = err as { message?: string; stdout?: string; stderr?: string; code?: number };
+    const e = err as {
+      message?: string;
+      stdout?: string;
+      stderr?: string;
+      code?: number | string;
+      killed?: boolean;
+    };
+    if (e.killed || e.code === 'ETIMEDOUT') {
+      return {
+        ok: false,
+        content: `run_command timed out after ${timeout}ms: ${file} ${argv.join(' ')}`.trim(),
+      };
+    }
     const bits = [e.stderr, e.stdout, e.message].filter(Boolean).join('\n').trim();
     return {
       ok: false,
       content: bits || `run_command failed (code ${e.code ?? '?'})`,
     };
   }
+}
+
+/** Characters that imply a shell — not allowed in the command-string fallback. */
+const SHELL_META = /[|&;<>$`\\(){}\[\]!\n\r]|\$\(|&&|\|\||>>|<</;
+
+function sanitizeEnv(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env, PWD: cwd };
+  // Drop interactive shell hooks that could surprise argv-only runs.
+  delete next.PROMPT_COMMAND;
+  delete next.BASH_ENV;
+  delete next.ENV;
+  return next;
 }
 
 /** Minimal split for demo commands — not a full shell parser. */

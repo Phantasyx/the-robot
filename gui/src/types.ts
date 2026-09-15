@@ -4,6 +4,7 @@ export interface ToolStepMeta {
   result?: string;
   ok?: boolean;
   planned?: boolean;
+  source?: 'model' | 'heuristic';
 }
 
 export interface RunStep {
@@ -73,6 +74,8 @@ export interface HealthInfo {
   routinesLoaded: number;
   ollama: { ok: boolean; detail: string };
   pendingApprovals?: number;
+  dataDir?: string;
+  conversationsDir?: string;
 }
 
 export type StreamEvent =

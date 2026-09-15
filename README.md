@@ -13,14 +13,14 @@ This initial release uses **TypeScript on Node 20+** so demos stay easy to run, 
 | Area | What you get today |
 | --- | --- |
 | **Multi-turn chat** | GUI + API send conversation history to Ollama; dry-run acknowledges prior turns |
-| **Built-in tools** | `list_dir`, `read_file`, `write_file` sandboxed to `ROBOT_WORKSPACE`; optional `run_command` |
+| **Built-in tools** | `list_dir`, `read_file`, `write_file` sandboxed to `ROBOT_WORKSPACE`; optional argv-only `run_command` |
 | **Skills** | `SKILL.md` packs under `skills/` with metadata and instructions |
 | **Routines** | Cron-style and simple trigger configs under `routines/` |
 | **MCP hooks** | Stub client surface ready for Model Context Protocol servers |
-| **Providers** | Live Ollama `/api/chat` (sync + stream) with graceful offline errors |
+| **Providers** | Live Ollama `/api/chat` with **tool calling**, sync/stream, graceful offline errors |
 | **Approvals** | Gate for write/destructive tools (`prompt` / `auto-approve` / `deny`); GUI Approve/Deny |
 | **CLI** | Branded `the-robot` / `robot` entry with help and dry-run loop |
-| **GUI** | Local chat UI with SSE streaming, tool activity, markdown replies |
+| **GUI** | Local chat UI with SSE streaming, tool activity, markdown replies, server conversation store |
 | **Desktop** | Optional Electron shell (`npm run desktop` / `npm run app`) |
 
 ## Quickstart (Ollama / local)
@@ -65,22 +65,26 @@ node dist/cli/index.js --help
 
 **History** — The GUI sends prior user/assistant turns with each `/api/chat` and `/api/chat/stream` request. Dry-run prints a conversation-context step; live mode includes history in the Ollama message list.
 
-**Built-in tools** (heuristic planner from the prompt):
+**Agent loop (live)** — Built-in tools are exposed as Ollama/OpenAI-compatible `tools`. When the model returns `tool_calls`, The Robot executes them (sandboxed + approval broker), feeds `role: tool` results back, and continues until a final answer or `ROBOT_MAX_TOOL_ROUNDS`. If the model returns no tool calls (or dry-run), a **prompt-heuristic** planner is the fallback.
+
+**Built-in tools**:
 
 | Tool | Tier | Notes |
 | --- | --- | --- |
 | `list_dir` | read | Lists a directory under `ROBOT_WORKSPACE` |
 | `read_file` | read | Reads a UTF-8 file under the workspace |
 | `write_file` | write | Creates/overwrites a file (approval-gated) |
-| `run_command` | destructive | Off by default; set `ROBOT_ENABLE_RUN_COMMAND=1` |
+| `run_command` | destructive | **Off by default.** Set `ROBOT_ENABLE_RUN_COMMAND=1`. **Argv-only** via `execFile` (no shell). Prefer `argv: ["cmd","arg"]`; a `command` string is split lightly and **rejects shell metacharacters**. Hard timeout: `ROBOT_RUN_COMMAND_TIMEOUT_MS` (default 15000). |
 
-Dry-run **plans** tool calls (no side effects). Live mode calls Ollama, then **executes** planned tools after Approve/Deny when needed. Paths cannot escape the workspace root.
+Dry-run **plans** tool calls (no side effects). Live mode prefers model tool-calling, then heuristic fallback. Paths cannot escape the workspace root.
+
+**Conversations** — Server JSON store under `ROBOT_DATA_DIR/conversations` (default `~/.the-robot/conversations`). GUI prefers the server store when the API is up; falls back to `localStorage`.
 
 Try in the GUI (dry-run first):
 
 1. Send `Remember that my project is called Orchid`
 2. Send `list the contents of .` — activity should mention prior turns + a `list_dir` plan
-3. Flip to Live (with Ollama) and Approve any write-tier tool prompts
+3. Flip to Live (with a tool-capable Ollama model) and Approve any write-tier tool prompts
 
 ## GUI quickstart
 
@@ -91,7 +95,7 @@ npm install          # also installs gui/ dependencies via postinstall
 npm run gui          # API on http://127.0.0.1:8787 + Vite on http://127.0.0.1:5173
 ```
 
-Open **http://127.0.0.1:5173** in your browser. Conversations persist in `localStorage`.
+Open **http://127.0.0.1:5173** in your browser. Conversations prefer the server store (`~/.the-robot/conversations`), with `localStorage` fallback.
 
 - **Dry-run** — fully offline planning; write-tier tools pause for Approve/Deny when `ROBOT_APPROVAL_MODE=prompt`.
 - **Live** — streams tokens from local Ollama via `POST /api/chat/stream`, then runs sandboxed tools. If Ollama is down, the UI shows a clear error (dry-run still works).
@@ -125,6 +129,10 @@ If Electron is awkward on your machine, skip it — the web GUI is the primary s
 | `POST` | `/api/chat/stream` | SSE: `step` / `token` / `approval_required` / `done` / `error` |
 | `POST` | `/api/approvals/:id` | `{ decision: "approve" \| "deny" }` |
 | `GET` | `/api/approvals` | Pending approval list |
+| `GET` | `/api/conversations` | List conversation summaries |
+| `GET` | `/api/conversations/:id` | Full conversation JSON |
+| `POST` | `/api/conversations` | Upsert conversation body |
+| `DELETE` | `/api/conversations/:id` | Delete conversation |
 
 ## Offline behavior
 
@@ -140,12 +148,13 @@ If Electron is awkward on your machine, skip it — the web GUI is the primary s
 CLI (the-robot / robot)  ─┐
 GUI (Vite + React)       ─┼→ HTTP API (node:http) ± SSE
 Desktop (Electron, opt.) ─┘
-                          └→ Runtime (history, dry-run / live loop)
+                          └→ Runtime (history, dry-run / live agent loop)
                                → Skills loader (SKILL.md packs)
                                → Routines scheduler (cron + triggers)
-                               → Provider (Ollama live + stream)
+                               → Provider (Ollama tools + stream)
                                → Built-in tools (sandboxed) + MCP hooks
                                → Approval gates (+ GUI broker)
+                               → Conversation JSON store (ROBOT_DATA_DIR)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for interview-ready detail.
@@ -177,7 +186,7 @@ Examples ship in-tree: `skills/summarize-notes`, `skills/local-file-ops`, and ro
 | `npm run start:gui` | Serve built GUI + API |
 | `npm run desktop` | Electron shell (requires `electron`) |
 | `npm run app` | Start API+GUI then Electron |
-| `npm test` | Smoke tests (runtime + API + tools + stream) |
+| `npm test` | Smoke + tool-call parsing + conversation store |
 | `npm run typecheck` | `tsc --noEmit` |
 
 ## License
