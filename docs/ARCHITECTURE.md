@@ -9,7 +9,7 @@ Interview-oriented overview of the scaffold. Implementation today is intentional
 - Automate recurring work with **routines** (cron + simple triggers).
 - Call external capabilities through **MCP tool hooks**.
 - Require **approval** before destructive actions.
-- Present a **branded CLI** (`the-robot` / `robot`) suitable for a personal distro.
+- Present a **branded CLI** (`the-robot` / `robot`) and local **chat GUI** suitable for a personal distro.
 
 ## Stack choice
 
@@ -20,13 +20,19 @@ Interview-oriented overview of the scaffold. Implementation today is intentional
 ```
 src/
   cli/           Command parsing, banner, help, entrypoint
+  server/        Local HTTP API + static GUI hosting
   core/          Runtime loop, skill loader, routine registry
   providers/     Ollama / local provider config and stubs
   mcp/           MCP client hooks (connect / list / call stubs)
   approvals/     Destructive-action gate
+gui/             Vite + React chat UI (sidebar, thread, composer)
 skills/          Example SKILL.md packs
 routines/        Example schedule / trigger configs
 ```
+
+### GUI + HTTP API
+
+`src/server/api.ts` exposes `/api/health`, `/api/skills`, `/api/routines`, and `/api/chat`, calling the same `runSession` used by the CLI. In dev, Vite proxies `/api` to port 8787; in production, the API serves `gui/dist` as static files. The UI keeps conversations in `localStorage` and can later be wrapped by Electron without changing the runtime.
 
 ### CLI
 

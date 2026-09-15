@@ -1,7 +1,7 @@
 {
   "name": "the-robot",
   "version": "0.1.0",
-  "description": "The Robot \u2014 personal offline-capable agent runtime",
+  "description": "The Robot — personal offline-capable agent runtime",
   "type": "module",
   "bin": {
     "the-robot": "./dist/cli/index.js",
@@ -12,8 +12,13 @@
     "start": "node dist/cli/index.js",
     "dev": "tsx src/cli/index.ts",
     "robot": "tsx src/cli/index.ts",
-    "test": "node --import tsx --test tests/smoke.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "node --import tsx --test tests/smoke.test.ts tests/api.smoke.test.ts",
+    "typecheck": "tsc --noEmit",
+    "gui": "node scripts/gui-dev.mjs",
+    "gui:build": "npm install --prefix gui && npm run build --prefix gui",
+    "gui:install": "npm install --prefix gui",
+    "start:gui": "tsx src/server/index.ts --static",
+    "postinstall": "npm install --prefix gui --no-fund --no-audit"
   },
   "engines": {
     "node": ">=20"
@@ -24,7 +29,8 @@
     "mcp",
     "ollama",
     "offline",
-    "skills"
+    "skills",
+    "gui"
   ],
   "license": "Apache-2.0",
   "repository": {
