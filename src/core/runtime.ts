@@ -75,6 +75,22 @@ function emit(opts: RunOptions, event: SessionEvent): void {
   opts.onEvent?.(event);
 }
 
+/** Emit final assistant text in small chunks so the GUI can render progressively. */
+async function emitProgressiveTokens(opts: RunOptions, text: string): Promise<void> {
+  if (!text) return;
+  if (!opts.onEvent) {
+    emit(opts, { type: 'token', text });
+    return;
+  }
+  const chunkSize = 36;
+  for (let i = 0; i < text.length; i += chunkSize) {
+    if (opts.signal?.aborted) break;
+    emit(opts, { type: 'token', text: text.slice(i, i + chunkSize) });
+    // Yield so SSE / UI can flush between chunks
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 function pushStep(
   steps: RunStep[],
   opts: RunOptions,
@@ -388,7 +404,7 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
       // Final natural-language answer (no tool calls this round)
       replyContent = result.content || '';
       if (replyContent) {
-        emit(opts, { type: 'token', text: replyContent });
+        await emitProgressiveTokens(opts, replyContent);
         pushStep(steps, opts, 'provider', replyContent);
       } else {
         pushStep(steps, opts, 'provider', '(empty model content)');
@@ -461,20 +477,40 @@ export async function runSession(config: RobotConfig, opts: RunOptions): Promise
 
     if (toolResults.length > 0 && !opts.signal?.aborted) {
       try {
-        const followUp = await provider.chat(
-          [
-            ...messages,
-            {
-              role: 'user',
-              content: `Tool results:\n\n${toolResults.map((t) => truncate(t, 2000)).join('\n\n---\n\n')}\n\nBriefly incorporate these into your answer for the user.`,
+        const followMessages: ChatMessage[] = [
+          ...messages,
+          {
+            role: 'user',
+            content: `Tool results:\n\n${toolResults.map((t) => truncate(t, 2000)).join('\n\n---\n\n')}\n\nBriefly incorporate these into your answer for the user.`,
+          },
+        ];
+        // No tools on follow-up — stream tokens when the provider supports it
+        let followContent = '';
+        if (provider.chatStream) {
+          const streamed = await provider.chatStream(followMessages, {
+            signal: opts.signal,
+            stream: true,
+            onToken: (token) => {
+              followContent += token;
+              emit(opts, { type: 'token', text: token });
             },
-          ],
-          { signal: opts.signal, stream: false },
-        );
-        if (followUp.content.trim()) {
-          replyContent = followUp.content;
-          emit(opts, { type: 'token', text: `\n\n${followUp.content}` });
-          pushStep(steps, opts, 'provider', followUp.content);
+          });
+          followContent = streamed.content || followContent;
+          replyModel = streamed.model || replyModel;
+        } else {
+          const followUp = await provider.chat(followMessages, {
+            signal: opts.signal,
+            stream: false,
+          });
+          followContent = followUp.content;
+          replyModel = followUp.model || replyModel;
+          if (followContent.trim()) {
+            await emitProgressiveTokens(opts, followContent);
+          }
+        }
+        if (followContent.trim()) {
+          replyContent = followContent;
+          pushStep(steps, opts, 'provider', followContent);
         }
       } catch {
         // Tool results already in activity; follow-up is optional

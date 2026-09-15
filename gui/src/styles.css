@@ -746,3 +746,40 @@ button {
 .step .kind-approval {
   color: var(--warn);
 }
+
+.conv-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.conv-row .conv-item {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.conv-delete {
+  flex: 0 0 28px;
+  width: 28px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.55;
+}
+
+.conv-row:hover .conv-delete,
+.conv-row:focus-within .conv-delete {
+  opacity: 1;
+}
+
+.conv-delete:hover {
+  background: rgba(240, 113, 120, 0.12);
+  color: var(--danger);
+  border-color: rgba(240, 113, 120, 0.25);
+}

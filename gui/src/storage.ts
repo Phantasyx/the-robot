@@ -85,3 +85,20 @@ export async function persistConversations(
     /* keep local copy; server may be briefly unavailable */
   }
 }
+
+/** Delete one conversation: always drop localStorage entry; DELETE on server when using server store. */
+export async function removeConversation(
+  id: string,
+  opts: { server: boolean },
+): Promise<void> {
+  const local = loadConversationsLocal().filter((c) => c.id !== id);
+  saveConversationsLocal(local);
+  if (opts.server) {
+    try {
+      await apiDelete(id);
+    } catch {
+      /* server may already lack the file */
+    }
+  }
+}
+

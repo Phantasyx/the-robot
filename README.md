@@ -102,10 +102,14 @@ Open **http://127.0.0.1:5173** in your browser. Conversations prefer the server 
 
 Production-style (built static UI + API on one port):
 
+`gui/dist` is **gitignored**. Always build before `start:gui` (or after GUI source changes):
+
 ```bash
-npm run gui:build
+npm run gui:build    # writes gui/dist — required, not committed
 npm run start:gui    # http://127.0.0.1:8787
 ```
+
+See [TESTING.md](TESTING.md) for a full install → dry-run → live Ollama → approvals checklist.
 
 ### Desktop window (optional)
 

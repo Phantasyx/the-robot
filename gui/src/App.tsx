@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { fetchHealth, fetchRoutines, fetchSkills, resolveApproval, streamChat } from './api';
 import { Markdown } from './Markdown';
-import { loadConversationsHybrid, persistConversations, uid, type StoreSource } from './storage';
+import { loadConversationsHybrid, persistConversations, removeConversation, uid, type StoreSource } from './storage';
 import type {
   ChatMessage,
   Conversation,
@@ -203,6 +203,30 @@ export default function App() {
     setActiveId(c.id);
     setDraft('');
     textareaRef.current?.focus();
+  };
+
+  const deleteChat = (id: string) => {
+    const remaining = conversations.filter((c) => c.id !== id);
+    let nextActive = activeId;
+    if (id === activeId) {
+      nextActive = remaining[0]?.id ?? '';
+    }
+    if (remaining.length === 0) {
+      const fresh = createConversation({
+        dryRun: active?.dryRun ?? true,
+        skill: active?.skill,
+        routine: active?.routine,
+      });
+      setConversations([fresh]);
+      setActiveId(fresh.id);
+      prevIdsRef.current = new Set([fresh.id]);
+      void removeConversation(id, { server: storeSource === 'server' });
+      return;
+    }
+    setConversations(remaining);
+    if (nextActive) setActiveId(nextActive);
+    prevIdsRef.current = new Set(remaining.map((c) => c.id));
+    void removeConversation(id, { server: storeSource === 'server' });
   };
 
   const send = async () => {
@@ -415,17 +439,30 @@ export default function App() {
             </div>
           ) : (
             conversations.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className={`conv-item${c.id === active?.id ? ' active' : ''}`}
-                onClick={() => setActiveId(c.id)}
-              >
-                <div className="conv-title">{c.title}</div>
-                <div className="conv-meta">
-                  {c.dryRun ? 'Dry-run' : 'Live'} · {formatTime(c.updatedAt)}
-                </div>
-              </button>
+              <div key={c.id} className="conv-row">
+                <button
+                  type="button"
+                  className={`conv-item${c.id === active?.id ? ' active' : ''}`}
+                  onClick={() => setActiveId(c.id)}
+                >
+                  <div className="conv-title">{c.title}</div>
+                  <div className="conv-meta">
+                    {c.dryRun ? 'Dry-run' : 'Live'} · {formatTime(c.updatedAt)}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="conv-delete"
+                  title="Delete conversation"
+                  aria-label={`Delete ${c.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteChat(c.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
             ))
           )}
 
