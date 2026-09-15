@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { fetchHealth, fetchRoutines, fetchSkills, postChat } from './api';
+import { fetchHealth, fetchRoutines, fetchSkills, resolveApproval, streamChat } from './api';
+import { Markdown } from './Markdown';
 import { loadConversations, saveConversations, uid } from './storage';
-import type { ChatMessage, Conversation, HealthInfo, RoutineInfo, SkillInfo } from './types';
+import type {
+  ChatMessage,
+  Conversation,
+  HealthInfo,
+  PendingApproval,
+  RoutineInfo,
+  RunStep,
+  SkillInfo,
+  StreamEvent,
+} from './types';
 
 function titleFromPrompt(prompt: string): string {
   const t = prompt.trim().replace(/\s+/g, ' ');
@@ -45,37 +55,46 @@ export default function App() {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [approving, setApproving] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? conversations[0],
     [conversations, activeId],
   );
 
+  const pendingApproval = useMemo(() => {
+    const msgs = active?.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].pendingApproval) return msgs[i].pendingApproval!;
+    }
+    return null as PendingApproval | null;
+  }, [active?.messages]);
+
   useEffect(() => {
     saveConversations(conversations);
   }, [conversations]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [h, s, r] = await Promise.all([fetchHealth(), fetchSkills(), fetchRoutines()]);
-        if (cancelled) return;
-        setHealth(h);
-        setSkills(s);
-        setRoutines(r);
-        setLoadError(null);
-      } catch (err) {
-        if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : String(err));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const refreshHealth = useCallback(async () => {
+    try {
+      const [h, s, r] = await Promise.all([fetchHealth(), fetchSkills(), fetchRoutines()]);
+      setHealth(h);
+      setSkills(s);
+      setRoutines(r);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+      setHealth(null);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshHealth();
+    const t = setInterval(() => void refreshHealth(), 8000);
+    return () => clearInterval(t);
+  }, [refreshHealth]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -86,6 +105,25 @@ export default function App() {
   const updateActive = useCallback(
     (updater: (c: Conversation) => Conversation) => {
       setConversations((prev) => prev.map((c) => (c.id === active?.id ? updater(c) : c)));
+    },
+    [active?.id],
+  );
+
+  const patchAssistant = useCallback(
+    (assistantId: string, patch: Partial<ChatMessage> | ((m: ChatMessage) => ChatMessage)) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== active?.id) return c;
+          return {
+            ...c,
+            updatedAt: Date.now(),
+            messages: c.messages.map((m) => {
+              if (m.id !== assistantId) return m;
+              return typeof patch === 'function' ? patch(m) : { ...m, ...patch };
+            }),
+          };
+        }),
+      );
     },
     [active?.id],
   );
@@ -114,60 +152,160 @@ export default function App() {
       createdAt: Date.now(),
     };
 
+    const assistantId = uid('msg');
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      steps: [],
+      streaming: true,
+      createdAt: Date.now(),
+    };
+
     updateActive((c) => ({
       ...c,
       title: c.messages.length === 0 ? titleFromPrompt(prompt || c.routine || 'Routine') : c.title,
-      messages: [...c.messages, userMsg],
+      messages: [...c.messages, userMsg, assistantMsg],
       updatedAt: Date.now(),
     }));
     setDraft('');
     setSending(true);
 
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    let tokenBuf = '';
+    let steps: RunStep[] = [];
+    let sawDone = false;
+    let sawError = false;
+
     try {
-      const result = await postChat({
-        prompt,
-        dryRun: active.dryRun,
-        skill: active.skill || undefined,
-        routine: active.routine || undefined,
-      });
+      await streamChat(
+        {
+          prompt,
+          dryRun: active.dryRun,
+          skill: active.skill || undefined,
+          routine: active.routine || undefined,
+        },
+        (event: StreamEvent) => {
+          if (event.type === 'token') {
+            tokenBuf += event.text;
+            patchAssistant(assistantId, {
+              content: tokenBuf,
+              streaming: true,
+              steps: [...steps],
+            });
+            return;
+          }
+          if (event.type === 'step') {
+            steps = [...steps, event.step];
+            // Prefer streamed tokens for main content; otherwise surface latest provider/plan text
+            const provider = [...steps].reverse().find((s) => s.kind === 'provider');
+            patchAssistant(assistantId, {
+              content: tokenBuf || provider?.message || '',
+              steps: [...steps],
+              streaming: true,
+            });
+            return;
+          }
+          if (event.type === 'approval_required') {
+            patchAssistant(assistantId, {
+              pendingApproval: {
+                id: event.id,
+                action: event.action,
+                tier: event.tier,
+                detail: event.detail,
+              },
+              steps: [...steps],
+              streaming: true,
+            });
+            return;
+          }
+          if (event.type === 'done') {
+            sawDone = true;
+            steps = event.steps;
+            const providerStep = [...event.steps].reverse().find((s) => s.kind === 'provider');
+            const content =
+              tokenBuf ||
+              providerStep?.message ||
+              event.summary ||
+              (active.dryRun
+                ? 'Dry-run finished. Expand activity to inspect planned steps.'
+                : 'Session complete.');
+            patchAssistant(assistantId, {
+              content,
+              summary: event.summary,
+              steps: event.steps,
+              streaming: false,
+              pendingApproval: undefined,
+            });
+            return;
+          }
+          if (event.type === 'error') {
+            sawError = true;
+            patchAssistant(assistantId, {
+              content: event.message || 'Request failed',
+              error: true,
+              streaming: false,
+              pendingApproval: undefined,
+              steps: [...steps],
+            });
+          }
+        },
+        ac.signal,
+      );
 
-      const providerStep = [...result.steps].reverse().find((s) => s.kind === 'provider');
-      const content =
-        providerStep?.message ||
-        result.summary ||
-        (active.dryRun
-          ? 'Dry-run finished. Expand activity to inspect planned steps.'
-          : 'Session complete.');
-
-      const assistantMsg: ChatMessage = {
-        id: uid('msg'),
-        role: 'assistant',
-        content,
-        summary: result.summary,
-        steps: result.steps,
-        createdAt: Date.now(),
-      };
-
-      updateActive((c) => ({
-        ...c,
-        messages: [...c.messages, assistantMsg],
-        updatedAt: Date.now(),
-      }));
+      if (!sawDone && !sawError) {
+        const providerStep = [...steps].reverse().find((s) => s.kind === 'provider');
+        patchAssistant(assistantId, {
+          content:
+            tokenBuf ||
+            providerStep?.message ||
+            (active.dryRun ? 'Dry-run finished.' : 'Session complete.'),
+          steps,
+          streaming: false,
+          pendingApproval: undefined,
+        });
+      }
     } catch (err) {
-      const assistantMsg: ChatMessage = {
-        id: uid('msg'),
-        role: 'assistant',
-        content: err instanceof Error ? err.message : String(err),
-        error: true,
-        createdAt: Date.now(),
-      };
-      updateActive((c) => ({
-        ...c,
-        messages: [...c.messages, assistantMsg],
-        updatedAt: Date.now(),
-      }));
+      if ((err as Error)?.name === 'AbortError') {
+        patchAssistant(assistantId, {
+          content: tokenBuf || 'Cancelled.',
+          streaming: false,
+          pendingApproval: undefined,
+        });
+      } else {
+        patchAssistant(assistantId, {
+          content: err instanceof Error ? err.message : String(err),
+          error: true,
+          streaming: false,
+          pendingApproval: undefined,
+          steps,
+        });
+      }
     } finally {
       setSending(false);
+      abortRef.current = null;
+      void refreshHealth();
+    }
+  };
+
+  const onApprove = async (decision: 'approve' | 'deny') => {
+    if (!pendingApproval || approving) return;
+    setApproving(true);
+    try {
+      await resolveApproval(pendingApproval.id, decision);
+      // Clear pending badge; stream will continue with approval step
+      if (active) {
+        const last = [...active.messages].reverse().find((m) => m.pendingApproval?.id === pendingApproval.id);
+        if (last) {
+          patchAssistant(last.id, { pendingApproval: undefined });
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -177,6 +315,10 @@ export default function App() {
       void send();
     }
   };
+
+  const apiUp = Boolean(health?.ok) && !loadError;
+  const ollamaUp = Boolean(health?.ollama?.ok);
+  const modeLive = !(active?.dryRun ?? true);
 
   return (
     <div className="app">
@@ -199,22 +341,30 @@ export default function App() {
 
         <div className="sidebar-scroll">
           <div className="section-label">Conversations</div>
-          {conversations.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              className={`conv-item${c.id === active?.id ? ' active' : ''}`}
-              onClick={() => setActiveId(c.id)}
-            >
-              <div className="conv-title">{c.title}</div>
-              <div className="conv-meta">{formatTime(c.updatedAt)}</div>
-            </button>
-          ))}
+          {conversations.length === 0 ? (
+            <div className="meta-item">
+              <div className="desc">No conversations yet</div>
+            </div>
+          ) : (
+            conversations.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`conv-item${c.id === active?.id ? ' active' : ''}`}
+                onClick={() => setActiveId(c.id)}
+              >
+                <div className="conv-title">{c.title}</div>
+                <div className="conv-meta">
+                  {c.dryRun ? 'Dry-run' : 'Live'} · {formatTime(c.updatedAt)}
+                </div>
+              </button>
+            ))
+          )}
 
           <div className="section-label">Skills</div>
           {skills.length === 0 ? (
             <div className="meta-item">
-              <div className="desc">{loadError ? 'API offline' : 'No skills loaded'}</div>
+              <div className="desc">{loadError ? 'API offline — start with npm run gui' : 'No skills loaded'}</div>
             </div>
           ) : (
             skills.map((s) => (
@@ -232,7 +382,9 @@ export default function App() {
                 title={s.description}
               >
                 <div className="name">{s.name}</div>
-                <div className="desc">{s.description || s.approval}</div>
+                <div className="desc">
+                  {s.description || s.approval} · {s.approval}
+                </div>
               </button>
             ))
           )}
@@ -268,10 +420,17 @@ export default function App() {
 
         <div className="status-panel">
           <div className="status-row">
-            <span>Status</span>
+            <span>API</span>
             <span>
-              <span className={`status-dot ${health?.ok ? 'ok' : 'bad'}`} />
-              {health ? 'API up' : loadError ? 'API down' : '…'}
+              <span className={`status-dot ${apiUp ? 'ok' : 'bad'}`} />
+              {apiUp ? 'connected' : loadError ? 'offline' : '…'}
+            </span>
+          </div>
+          <div className="status-row">
+            <span>Ollama</span>
+            <span title={health?.ollama?.detail}>
+              <span className={`status-dot ${ollamaUp ? 'ok' : 'bad'}`} />
+              {ollamaUp ? 'reachable' : 'offline'}
             </span>
           </div>
           <div className="status-row">
@@ -283,11 +442,8 @@ export default function App() {
             <span>{health?.model ?? '—'}</span>
           </div>
           <div className="status-row">
-            <span>Ollama</span>
-            <span>
-              <span className={`status-dot ${health?.ollama?.ok ? 'ok' : 'bad'}`} />
-              {health?.ollama?.ok ? 'reachable' : 'offline'}
-            </span>
+            <span>Approvals</span>
+            <span>{health?.approvalMode ?? '—'}</span>
           </div>
           <div className="status-row">
             <span>Loaded</span>
@@ -303,48 +459,117 @@ export default function App() {
           <div>
             <h1>{active?.title ?? 'The Robot'}</h1>
             <p>
-              {active?.dryRun ? 'Dry-run mode' : 'Live session'}
-              {active?.skill ? ` · skill ${active.skill}` : ''}
+              {active?.skill ? `skill ${active.skill}` : 'auto skill'}
               {active?.routine ? ` · routine ${active.routine}` : ''}
+              {!apiUp ? ' · API disconnected' : ''}
+              {modeLive && !ollamaUp ? ' · Ollama offline (live will fail)' : ''}
             </p>
           </div>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              if (!active) return;
-              updateActive((c) => ({
-                ...c,
-                title: 'New chat',
-                messages: [],
-                updatedAt: Date.now(),
-              }));
-            }}
-          >
-            Clear chat
-          </button>
+          <div className="header-actions">
+            <span className={`mode-badge ${modeLive ? 'live' : 'dry'}`} title={modeLive ? 'Calls local Ollama' : 'Plans only — no model or tool side effects'}>
+              {modeLive ? 'Live' : 'Dry-run'}
+            </span>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                if (!active) return;
+                updateActive((c) => ({
+                  ...c,
+                  title: 'New chat',
+                  messages: [],
+                  updatedAt: Date.now(),
+                }));
+              }}
+            >
+              Clear chat
+            </button>
+          </div>
         </header>
 
         <div className="thread" ref={threadRef}>
           {!active?.messages.length && (
             <div className="empty-state">
+              <div className="empty-icon" aria-hidden>
+                ⌖
+              </div>
               <h2>Ready when you are</h2>
               <p>
-                Send a prompt to run a session. Dry-run plans steps without calling tools; turn it
-                off to hit the local provider path. Pick a skill or routine from the sidebar to
-                steer the runtime.
+                Dry-run plans steps offline without calling Ollama. Flip to <strong>Live</strong> when
+                Ollama is running to stream a real reply. Pick a skill or routine from the sidebar —
+                write-tier skills pause for Approve / Deny when approval mode is <code>prompt</code>.
               </p>
+              <div className="empty-tips">
+                <button type="button" className="chip" onClick={() => setDraft('summarize notes in ./notes')}>
+                  Summarize notes
+                </button>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => {
+                    updateActive((c) => ({ ...c, skill: 'local-file-ops', routine: undefined }));
+                    setDraft('Propose a safe cleanup plan for tmp/ clutter');
+                  }}
+                >
+                  File cleanup plan
+                </button>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => {
+                    const r = routines.find((x) => x.name === 'daily-notes-digest');
+                    if (r) updateActive((c) => ({ ...c, routine: r.name, skill: r.skill }));
+                  }}
+                >
+                  Run daily digest routine
+                </button>
+              </div>
             </div>
           )}
 
           {active?.messages.map((m) => (
             <div key={m.id} className={`message-row ${m.role}`}>
-              <div className={`bubble ${m.role}${m.error ? ' error' : ''}`}>
+              <div className={`bubble ${m.role}${m.error ? ' error' : ''}${m.streaming ? ' streaming' : ''}`}>
                 <div className="bubble-label">{m.role === 'user' ? 'You' : 'The Robot'}</div>
-                <div>{m.content}</div>
+                {m.role === 'assistant' && !m.error ? (
+                  m.content ? (
+                    <Markdown text={m.content} />
+                  ) : m.streaming ? (
+                    <div className="typing">Working…</div>
+                  ) : (
+                    <div className="typing">No content</div>
+                  )
+                ) : (
+                  <div className="plain">{m.content}</div>
+                )}
+                {m.pendingApproval ? (
+                  <div className="approval-card">
+                    <div className="approval-title">Approval required</div>
+                    <div className="approval-body">
+                      <div>
+                        <strong>{m.pendingApproval.action}</strong>
+                        <span className="tier"> · {m.pendingApproval.tier}</span>
+                      </div>
+                      {m.pendingApproval.detail ? <div className="detail">{m.pendingApproval.detail}</div> : null}
+                    </div>
+                    <div className="approval-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={approving}
+                        onClick={() => void onApprove('approve')}
+                      >
+                        Approve
+                      </button>
+                      <button type="button" className="btn" disabled={approving} onClick={() => void onApprove('deny')}>
+                        Deny
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 {m.summary && !m.error ? <div className="summary">{m.summary}</div> : null}
                 {m.steps && m.steps.length > 0 ? (
-                  <details className="activity">
+                  <details className="activity" open={Boolean(m.streaming && !m.content)}>
                     <summary>Activity · {m.steps.length} steps</summary>
                     <div className="activity-list">
                       {m.steps.map((s) => (
@@ -360,26 +585,17 @@ export default function App() {
               </div>
             </div>
           ))}
-
-          {sending ? (
-            <div className="message-row assistant">
-              <div className="bubble assistant">
-                <div className="bubble-label">The Robot</div>
-                <div>Working…</div>
-              </div>
-            </div>
-          ) : null}
         </div>
 
         <div className="composer">
           <div className="composer-toolbar">
-            <label className="toggle">
+            <label className={`toggle ${modeLive ? 'live' : 'dry'}`}>
               <input
                 type="checkbox"
                 checked={active?.dryRun ?? true}
                 onChange={(e) => updateActive((c) => ({ ...c, dryRun: e.target.checked }))}
               />
-              Dry-run
+              {active?.dryRun ? 'Dry-run' : 'Live mode'}
             </label>
 
             <label className="field">
@@ -433,20 +649,25 @@ export default function App() {
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Message The Robot… (Enter to send, Shift+Enter for newline)"
-              disabled={sending}
+              disabled={sending || Boolean(pendingApproval)}
             />
             <button
               type="button"
               className="btn btn-primary send"
               onClick={() => void send()}
-              disabled={sending || (!draft.trim() && !active?.routine)}
+              disabled={sending || Boolean(pendingApproval) || (!draft.trim() && !active?.routine)}
             >
-              Send
+              {sending ? '…' : 'Send'}
             </button>
           </div>
           <div className="hint">
-            Conversations stay in this browser (localStorage). Runtime calls hit the local API —
-            no cloud required.
+            {apiUp
+              ? modeLive
+                ? ollamaUp
+                  ? 'Live streaming via local Ollama. Conversations stay in this browser.'
+                  : 'Live mode needs Ollama — doctor shows it offline. Dry-run still works fully offline.'
+                : 'Dry-run is fully offline. Conversations stay in this browser (localStorage).'
+              : 'Start the API with npm run gui or npm run start:gui.'}
           </div>
         </div>
       </main>

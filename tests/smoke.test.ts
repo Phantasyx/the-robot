@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decideApproval } from '../src/approvals/gate.js';
+import { decideApproval, resolveApproval } from '../src/approvals/gate.js';
+import { ApprovalBroker } from '../src/approvals/broker.js';
 import { loadConfig } from '../src/core/config.js';
 import { loadRoutines } from '../src/core/routines.js';
 import { runSession } from '../src/core/runtime.js';
 import { loadSkills } from '../src/core/skills.js';
+import { OllamaProvider } from '../src/providers/ollama.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,5 +49,48 @@ describe('The Robot smoke', () => {
       tier: 'destructive',
     });
     assert.equal(d.allowed, false);
+  });
+
+  it('interactive resolveApproval uses handler in prompt mode', async () => {
+    const d = await resolveApproval(
+      'prompt',
+      { action: 'write-file', tier: 'write' },
+      async () => ({ allowed: false, reason: 'user denied' }),
+    );
+    assert.equal(d.allowed, false);
+    assert.match(d.reason, /user denied/);
+  });
+
+  it('approval broker resolves pending ids', async () => {
+    const broker = new ApprovalBroker();
+    const { id, promise } = broker.create({ action: 'test', tier: 'write' }, 2000);
+    assert.ok(broker.get(id));
+    const ok = broker.resolve(id, true);
+    assert.equal(ok, true);
+    const d = await promise;
+    assert.equal(d.allowed, true);
+  });
+
+  it('ollama ping reports unreachable when down', async () => {
+    const p = new OllamaProvider({ host: 'http://127.0.0.1:9', model: 'llama3.2' });
+    const ping = await p.ping();
+    assert.equal(ping.ok, false);
+    assert.match(ping.detail, /not reachable/i);
+  });
+
+  it('live session fails gracefully when Ollama is down', async () => {
+    const config = loadConfig({
+      skillsDir: path.join(root, 'skills'),
+      routinesDir: path.join(root, 'routines'),
+      ollamaHost: 'http://127.0.0.1:9',
+    });
+    await assert.rejects(
+      () =>
+        runSession(config, {
+          prompt: 'hello robot',
+          dryRun: false,
+        }),
+      /Ollama|reachable|fetch|ECONNREFUSED/i,
+    );
   });
 });

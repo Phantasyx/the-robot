@@ -4,6 +4,13 @@ export interface RunStep {
   message: string;
 }
 
+export interface PendingApproval {
+  id: string;
+  action: string;
+  tier: string;
+  detail?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -11,6 +18,8 @@ export interface ChatMessage {
   summary?: string;
   steps?: RunStep[];
   error?: boolean;
+  streaming?: boolean;
+  pendingApproval?: PendingApproval;
   createdAt: number;
 }
 
@@ -52,4 +61,19 @@ export interface HealthInfo {
   skillsLoaded: number;
   routinesLoaded: number;
   ollama: { ok: boolean; detail: string };
+  pendingApprovals?: number;
 }
+
+export type StreamEvent =
+  | { type: 'step'; step: RunStep }
+  | { type: 'token'; text: string }
+  | {
+      type: 'approval_required';
+      id: string;
+      action: string;
+      tier: string;
+      detail?: string;
+    }
+  | { type: 'done'; summary: string; steps: RunStep[] }
+  | { type: 'error'; message: string }
+  | { type: 'close' };

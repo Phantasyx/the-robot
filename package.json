@@ -18,6 +18,8 @@
     "gui:build": "npm install --prefix gui && npm run build --prefix gui",
     "gui:install": "npm install --prefix gui",
     "start:gui": "tsx src/server/index.ts --static",
+    "desktop": "node scripts/desktop.mjs",
+    "app": "ROBOT_DESKTOP_START_API=1 node scripts/desktop.mjs --with-api",
     "postinstall": "npm install --prefix gui --no-fund --no-audit"
   },
   "engines": {
@@ -30,7 +32,8 @@
     "ollama",
     "offline",
     "skills",
-    "gui"
+    "gui",
+    "electron"
   ],
   "license": "Apache-2.0",
   "repository": {

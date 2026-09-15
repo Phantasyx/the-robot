@@ -8,17 +8,18 @@ Design ideas and packaging patterns are inspired by [Goose](https://github.com/a
 
 This initial release uses **TypeScript on Node 20+** so demos stay easy to run, read, and extend in interviews. A future path is wiring Goose-style custom distro / MCP integrations on top of this layout; the module boundaries are shaped for that next step.
 
-## Features (scaffold)
+## Features
 
 | Area | What you get today |
 | --- | --- |
 | **Skills** | `SKILL.md` packs under `skills/` with metadata and instructions |
 | **Routines** | Cron-style and simple trigger configs under `routines/` |
 | **MCP hooks** | Stub client surface ready for Model Context Protocol servers |
-| **Providers** | Local / Ollama config first (`ROBOT_PROVIDER=ollama`) |
-| **Approvals** | Gate for destructive actions (`prompt` / `auto-approve` / `deny`) |
+| **Providers** | Live Ollama `/api/chat` (sync + stream) with graceful offline errors |
+| **Approvals** | Gate for destructive actions (`prompt` / `auto-approve` / `deny`); GUI Approve/Deny |
 | **CLI** | Branded `the-robot` / `robot` entry with help and dry-run loop |
-| **GUI** | Local chat UI (sidebar + thread + composer) wired to the runtime API |
+| **GUI** | Local chat UI with SSE streaming, markdown replies, connection badges |
+| **Desktop** | Optional Electron shell (`npm run desktop` / `npm run app`) |
 
 ## Quickstart (Ollama / local)
 
@@ -47,6 +48,7 @@ ollama pull llama3.2
 # ROBOT_OLLAMA_HOST=http://127.0.0.1:11434
 # ROBOT_MODEL=llama3.2
 npm run robot -- run "list available skills"
+npm run robot -- doctor   # reports Ollama reachability accurately
 ```
 
 Build and use the compiled binaries:
@@ -54,21 +56,21 @@ Build and use the compiled binaries:
 ```bash
 npm run build
 node dist/cli/index.js --help
-# after npm link, or via package bin:
-# the-robot --help
-# robot --help
 ```
 
 ## GUI quickstart
 
-The chat GUI is a local web app (Vite + React) served with a small Node HTTP API. No Electron required for this iteration; structure is ready to wrap later.
+The chat GUI is a local web app (Vite + React) served with a small Node HTTP API.
 
 ```bash
 npm install          # also installs gui/ dependencies via postinstall
 npm run gui          # API on http://127.0.0.1:8787 + Vite on http://127.0.0.1:5173
 ```
 
-Open **http://127.0.0.1:5173** in your browser. Conversations persist in `localStorage`. Use the Dry-run toggle for offline planning; turn it off to exercise the live provider path.
+Open **http://127.0.0.1:5173** in your browser. Conversations persist in `localStorage`.
+
+- **Dry-run** — fully offline planning; write-tier skills pause for Approve/Deny when `ROBOT_APPROVAL_MODE=prompt`.
+- **Live** — streams tokens from local Ollama via `POST /api/chat/stream`. If Ollama is down, the UI shows a clear error (dry-run still works).
 
 Production-style (built static UI + API on one port):
 
@@ -77,26 +79,49 @@ npm run gui:build
 npm run start:gui    # http://127.0.0.1:8787
 ```
 
-API surface:
+### Desktop window (optional)
+
+```bash
+npm install --save-dev electron   # once, if you want the shell
+npm run gui:build
+npm run app                       # starts API+GUI then opens Electron
+# or: npm run start:gui  &&  npm run desktop
+```
+
+If Electron is awkward on your machine, skip it — the web GUI is the primary surface. See [desktop/README.md](desktop/README.md).
+
+### API surface
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Doctor / status |
+| `GET` | `/api/health` | Doctor / status (includes Ollama ping) |
 | `GET` | `/api/skills` | Skill packs |
 | `GET` | `/api/routines` | Routines |
 | `POST` | `/api/chat` | `{ prompt, dryRun, skill?, routine? }` → `{ summary, steps }` |
+| `POST` | `/api/chat/stream` | SSE stream: `step` / `token` / `approval_required` / `done` / `error` |
+| `POST` | `/api/approvals/:id` | `{ decision: "approve" \| "deny" }` |
+| `GET` | `/api/approvals` | Pending approval list |
+
+## Offline behavior
+
+| Mode | Without Ollama | With Ollama |
+| --- | --- | --- |
+| Dry-run CLI / GUI | Full plan + approvals | Same |
+| Live CLI / GUI | Clear error from provider / health | Streams chat from `/api/chat` |
+| Doctor / health | `ollama.ok: false` + detail | `ollama.ok: true` + model note |
 
 ## Architecture overview
 
 ```
 CLI (the-robot / robot)  ─┐
-GUI (Vite + React)       ─┼→ HTTP API (node:http)
-                          └→ Runtime (session, dry-run loop)
+GUI (Vite + React)       ─┼→ HTTP API (node:http) ± SSE
+Desktop (Electron, opt.) ─┘
+                          └→ Runtime (session, dry-run / live loop)
                                → Skills loader (SKILL.md packs)
                                → Routines scheduler (cron + triggers)
-                               → Provider (Ollama / local stubs)
+                               → Provider (Ollama live + stream)
                                → MCP tool hooks
-                               → Approval gates
+                               → Approval gates (+ GUI broker)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for interview-ready detail.
@@ -104,7 +129,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for interview-ready detail.
 ## Skills and routines
 
 - **Skills** live in `skills/<name>/SKILL.md`. Each pack describes when to use it and what tools or steps it expects.
-- **Routines** live in `routines/*.json` (or `.yaml`-friendly JSON). They bind a schedule or trigger to a skill and prompt.
+- **Routines** live in `routines/*.json`. They bind a schedule or trigger to a skill and prompt.
 
 Examples ship in-tree: `skills/summarize-notes`, `skills/local-file-ops`, and routines for a daily summary and a file-watch style trigger.
 
@@ -126,7 +151,9 @@ Examples ship in-tree: `skills/summarize-notes`, `skills/local-file-ops`, and ro
 | `npm run gui` | Dev GUI: API + Vite |
 | `npm run gui:build` | Build GUI static assets |
 | `npm run start:gui` | Serve built GUI + API |
-| `npm test` | Smoke tests (runtime + API) |
+| `npm run desktop` | Electron shell (requires `electron`) |
+| `npm run app` | Start API+GUI then Electron |
+| `npm test` | Smoke tests (runtime + API + stream) |
 | `npm run typecheck` | `tsc --noEmit` |
 
 ## License

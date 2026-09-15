@@ -25,8 +25,9 @@ export function needsGate(tier: ApprovalTier): boolean {
 }
 
 /**
- * Approval gate for destructive / write actions.
- * In this scaffold, `prompt` logs intent and allows (no interactive TTY yet).
+ * Synchronous approval gate for deny / auto-approve / none.
+ * For `prompt` mode without an interactive handler, returns a soft allow
+ * (CLI dry-run demos). Prefer requestApproval hooks for GUI.
  */
 export function decideApproval(
   mode: ApprovalMode,
@@ -54,4 +55,21 @@ export function decideApproval(
         reason: `would prompt for approval: ${req.action}${req.detail ? ` — ${req.detail}` : ''}`,
       };
   }
+}
+
+/**
+ * Resolve an approval using an optional interactive handler when mode is `prompt`.
+ */
+export async function resolveApproval(
+  mode: ApprovalMode,
+  req: ApprovalRequest,
+  requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>,
+): Promise<ApprovalDecision> {
+  if (!needsGate(req.tier)) {
+    return { allowed: true, reason: `tier ${req.tier} does not require approval` };
+  }
+  if (mode === 'prompt' && requestApproval) {
+    return requestApproval(req);
+  }
+  return decideApproval(mode, req);
 }

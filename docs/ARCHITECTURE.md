@@ -22,9 +22,9 @@ src/
   cli/           Command parsing, banner, help, entrypoint
   server/        Local HTTP API + static GUI hosting
   core/          Runtime loop, skill loader, routine registry
-  providers/     Ollama / local provider config and stubs
+  providers/     Ollama live /api/chat (+ stream) with offline errors
   mcp/           MCP client hooks (connect / list / call stubs)
-  approvals/     Destructive-action gate
+  approvals/     Destructive-action gate + in-memory GUI broker
 gui/             Vite + React chat UI (sidebar, thread, composer)
 skills/          Example SKILL.md packs
 routines/        Example schedule / trigger configs
@@ -32,7 +32,7 @@ routines/        Example schedule / trigger configs
 
 ### GUI + HTTP API
 
-`src/server/api.ts` exposes `/api/health`, `/api/skills`, `/api/routines`, and `/api/chat`, calling the same `runSession` used by the CLI. In dev, Vite proxies `/api` to port 8787; in production, the API serves `gui/dist` as static files. The UI keeps conversations in `localStorage` and can later be wrapped by Electron without changing the runtime.
+`src/server/api.ts` exposes `/api/health`, `/api/skills`, `/api/routines`, `/api/chat`, SSE `/api/chat/stream`, and `/api/approvals/:id`, calling the same `runSession` used by the CLI. In dev, Vite proxies `/api` to port 8787; in production, the API serves `gui/dist` as static files. The UI streams tokens/steps over SSE, renders markdown, and can be wrapped by the optional Electron shell in `desktop/`.
 
 ### CLI
 
@@ -45,7 +45,7 @@ routines/        Example schedule / trigger configs
 1. Load config (env + defaults).
 2. Resolve skills and optional routine context.
 3. If dry-run: plan steps, print what would happen, exit.
-4. Else: call the provider stub / Ollama client, route tool requests through MCP + approvals.
+4. Else: call Ollama `/api/chat` (streaming when hooked), route tool requests through MCP + approvals.
 
 ### Skills
 
@@ -76,7 +76,7 @@ JSON configs under `routines/` describe:
 
 The registry lists and validates; a real scheduler (node-cron or system cron invoking the CLI) is the obvious next step.
 
-### Providers (offline mode)
+### Providers (Ollama)
 
 `src/providers/ollama.ts` centralizes host, model, and a `chat()` stub that can later call `/api/chat`. Offline-first means:
 

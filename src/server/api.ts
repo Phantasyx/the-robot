@@ -2,9 +2,11 @@ import http from 'node:http';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
+import { globalApprovalBroker } from '../approvals/broker.js';
+import type { ApprovalDecision, ApprovalRequest } from '../approvals/gate.js';
 import { loadConfig, ROOT, type RobotConfig } from '../core/config.js';
 import { loadRoutines } from '../core/routines.js';
-import { runSession } from '../core/runtime.js';
+import { runSession, type SessionEvent } from '../core/runtime.js';
 import { loadSkills } from '../core/skills.js';
 import { createProvider } from '../providers/ollama.js';
 
@@ -78,6 +80,7 @@ async function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse
     skillsLoaded: skills.length,
     routinesLoaded: routines.length,
     ollama: ping,
+    pendingApprovals: globalApprovalBroker.list().length,
   });
 }
 
@@ -98,33 +101,113 @@ async function handleRoutines(_req: http.IncomingMessage, res: http.ServerRespon
   sendJson(res, 200, { routines });
 }
 
-async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, config: RobotConfig): Promise<void> {
-  const body = await readJsonBody<{
-    prompt?: string;
-    dryRun?: boolean;
-    skill?: string;
-    routine?: string;
-    maxSteps?: number;
-  }>(req);
+type ChatBody = {
+  prompt?: string;
+  dryRun?: boolean;
+  skill?: string;
+  routine?: string;
+  maxSteps?: number;
+};
 
+async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, config: RobotConfig): Promise<void> {
+  const body = await readJsonBody<ChatBody>(req);
   const prompt = (body.prompt ?? '').trim();
   if (!prompt && !body.routine) {
     sendJson(res, 400, { error: 'prompt or routine is required' });
     return;
   }
 
-  const result = await runSession(config, {
-    prompt,
-    dryRun: body.dryRun !== false,
-    skillName: body.skill || undefined,
-    routineName: body.routine || undefined,
-    maxSteps: body.maxSteps,
-  });
+  try {
+    const result = await runSession(config, {
+      prompt,
+      dryRun: body.dryRun !== false,
+      skillName: body.skill || undefined,
+      routineName: body.routine || undefined,
+      maxSteps: body.maxSteps,
+    });
+    sendJson(res, 200, {
+      summary: result.summary,
+      steps: result.steps,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    sendJson(res, 502, { error: message });
+  }
+}
 
-  sendJson(res, 200, {
-    summary: result.summary,
-    steps: result.steps,
+function writeSse(res: http.ServerResponse, event: SessionEvent | { type: string; [k: string]: unknown }): void {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+async function handleChatStream(req: http.IncomingMessage, res: http.ServerResponse, config: RobotConfig): Promise<void> {
+  const body = await readJsonBody<ChatBody>(req);
+  const prompt = (body.prompt ?? '').trim();
+  if (!prompt && !body.routine) {
+    sendJson(res, 400, { error: 'prompt or routine is required' });
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const ac = new AbortController();
+  req.on('close', () => ac.abort());
+
+  const requestApproval = async (approvalReq: ApprovalRequest): Promise<ApprovalDecision> => {
+    const { id, promise } = globalApprovalBroker.create(approvalReq);
+    writeSse(res, {
+      type: 'approval_required',
+      id,
+      action: approvalReq.action,
+      tier: approvalReq.tier,
+      detail: approvalReq.detail,
+    });
+    return promise;
+  };
+
+  try {
+    await runSession(config, {
+      prompt,
+      dryRun: body.dryRun !== false,
+      skillName: body.skill || undefined,
+      routineName: body.routine || undefined,
+      maxSteps: body.maxSteps,
+      signal: ac.signal,
+      requestApproval: config.approvalMode === 'prompt' ? requestApproval : undefined,
+      onEvent: (event) => {
+        if (event.type === 'approval_required') return; // emitted via broker path
+        writeSse(res, event);
+      },
+    });
+  } catch (err) {
+    if (!ac.signal.aborted) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeSse(res, { type: 'error', message });
+    }
+  }
+
+  res.write('data: {"type":"close"}\n\n');
+  res.end();
+}
+
+async function handleApproval(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+  const body = await readJsonBody<{ decision?: string; reason?: string }>(req);
+  const decision = (body.decision ?? '').toLowerCase();
+  if (decision !== 'approve' && decision !== 'deny') {
+    sendJson(res, 400, { error: 'decision must be approve or deny' });
+    return;
+  }
+  const ok = globalApprovalBroker.resolve(id, decision === 'approve', body.reason);
+  if (!ok) {
+    sendJson(res, 404, { error: 'Unknown or expired approval id' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, id, decision });
 }
 
 async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath: string): Promise<boolean> {
@@ -149,7 +232,6 @@ async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath:
     res.end(data);
     return true;
   } catch {
-    // SPA fallback
     try {
       const index = path.join(staticDir, 'index.html');
       const data = await fsPromises.readFile(index);
@@ -195,6 +277,23 @@ export function createApiServer(options: ApiServerOptions = {}): http.Server {
         await handleChat(req, res, config);
         return;
       }
+      if (method === 'POST' && pathname === '/api/chat/stream') {
+        await handleChatStream(req, res, config);
+        return;
+      }
+      if (method === 'POST' && pathname.startsWith('/api/approvals/')) {
+        const id = decodeURIComponent(pathname.slice('/api/approvals/'.length));
+        if (!id) {
+          sendJson(res, 400, { error: 'approval id required' });
+          return;
+        }
+        await handleApproval(req, res, id);
+        return;
+      }
+      if (method === 'GET' && pathname === '/api/approvals') {
+        sendJson(res, 200, { pending: globalApprovalBroker.list() });
+        return;
+      }
 
       if (staticDir && method === 'GET') {
         const served = await serveStatic(res, staticDir, pathname);
@@ -204,7 +303,11 @@ export function createApiServer(options: ApiServerOptions = {}): http.Server {
       sendJson(res, 404, { error: 'Not found' });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { error: message });
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: message });
+      } else {
+        res.end();
+      }
     }
   });
 
@@ -223,7 +326,9 @@ export function staticDirExists(dir = defaultStaticDir()): boolean {
   }
 }
 
-export async function listenApiServer(options: ApiServerOptions = {}): Promise<{ server: http.Server; port: number; host: string }> {
+export async function listenApiServer(
+  options: ApiServerOptions = {},
+): Promise<{ server: http.Server; port: number; host: string }> {
   const host = options.host ?? process.env.ROBOT_GUI_HOST ?? '127.0.0.1';
   const port = options.port ?? Number(process.env.ROBOT_GUI_PORT ?? 8787);
   const staticDir =
