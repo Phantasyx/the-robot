@@ -1,0 +1,8 @@
+{
+  "name": "daily-notes-digest",
+  "description": "Morning digest of local notes via the summarize-notes skill",
+  "schedule": "0 9 * * *",
+  "skill": "summarize-notes",
+  "prompt": "Summarize new or recently edited notes under ./notes into a short daily brief.",
+  "enabled": true
+}

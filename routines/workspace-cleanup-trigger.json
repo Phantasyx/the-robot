@@ -1,0 +1,8 @@
+{
+  "name": "workspace-cleanup-trigger",
+  "description": "On-demand cleanup pass using local-file-ops (manual or file-change trigger)",
+  "trigger": "manual",
+  "skill": "local-file-ops",
+  "prompt": "Propose a safe cleanup plan for clutter in the workspace downloads/ and tmp/ folders. Do not delete without approval.",
+  "enabled": true
+}

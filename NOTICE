@@ -1,0 +1,12 @@
+The Robot
+Copyright 2026 Phantasyx
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Inspiration
+-----------
+Agent runtime and custom-distro packaging ideas are inspired by Goose
+(https://github.com/aaif-goose/goose), licensed under Apache-2.0.
+Goose is credited as upstream inspiration only; this project is not a
+fork and is branded separately as The Robot.
