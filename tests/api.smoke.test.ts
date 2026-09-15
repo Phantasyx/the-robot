@@ -157,6 +157,27 @@ describe('API smoke', () => {
     assert.match(rest, /"type":"done"/);
   });
 
+
+  it('POST /api/chat dry-run accepts history', async () => {
+    const res = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: 'list the directory .',
+        dryRun: true,
+        history: [
+          { role: 'user', content: 'hi' },
+          { role: 'assistant', content: 'hello' },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { summary: string; steps: Array<{ message: string }> };
+    assert.match(body.summary, /history=2/);
+    const joined = body.steps.map((s) => s.message).join('\n');
+    assert.match(joined, /Conversation context|2 messages|prior/i);
+  });
+
   it('POST /api/chat live without Ollama returns error', async () => {
     const res = await fetch(`${base}/api/chat`, {
       method: 'POST',

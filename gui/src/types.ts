@@ -1,7 +1,16 @@
+export interface ToolStepMeta {
+  name: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  ok?: boolean;
+  planned?: boolean;
+}
+
 export interface RunStep {
   index: number;
-  kind: 'plan' | 'skill' | 'provider' | 'tool' | 'approval';
+  kind: 'plan' | 'skill' | 'provider' | 'tool' | 'tool_result' | 'approval';
   message: string;
+  tool?: ToolStepMeta;
 }
 
 export interface PendingApproval {
@@ -58,6 +67,8 @@ export interface HealthInfo {
   model: string;
   ollamaHost: string;
   approvalMode: string;
+  workspaceRoot?: string;
+  enableRunCommand?: boolean;
   skillsLoaded: number;
   routinesLoaded: number;
   ollama: { ok: boolean; detail: string };

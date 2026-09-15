@@ -720,3 +720,29 @@ button {
   display: flex;
   gap: 8px;
 }
+
+
+.step.toolish .kind {
+  color: #9b87f5;
+}
+
+.step.kind-tool_result .kind,
+.step .kind-tool_result {
+  color: #3dd68c;
+}
+
+.step.bad .msg {
+  color: var(--danger);
+}
+
+.tool-args {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.step .kind-approval {
+  color: var(--warn);
+}

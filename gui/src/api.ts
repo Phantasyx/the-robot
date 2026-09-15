@@ -22,11 +22,14 @@ export async function fetchRoutines(): Promise<RoutineInfo[]> {
   return data.routines;
 }
 
+export type HistoryItem = { role: 'user' | 'assistant' | 'system'; content: string };
+
 export async function postChat(body: {
   prompt: string;
   dryRun: boolean;
   skill?: string;
   routine?: string;
+  history?: HistoryItem[];
 }): Promise<{ summary: string; steps: RunStep[] }> {
   return parseJson(
     await fetch('/api/chat', {
@@ -57,6 +60,7 @@ export async function streamChat(
     dryRun: boolean;
     skill?: string;
     routine?: string;
+    history?: HistoryItem[];
   },
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal,

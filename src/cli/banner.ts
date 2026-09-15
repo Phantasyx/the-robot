@@ -40,9 +40,11 @@ Examples:
   robot doctor
 
 Environment:
-  ROBOT_PROVIDER          ollama (default)
-  ROBOT_OLLAMA_HOST       http://127.0.0.1:11434
-  ROBOT_MODEL             llama3.2
-  ROBOT_APPROVAL_MODE     prompt | auto-approve | deny
+  ROBOT_PROVIDER            ollama (default)
+  ROBOT_OLLAMA_HOST         http://127.0.0.1:11434
+  ROBOT_MODEL               llama3.2
+  ROBOT_APPROVAL_MODE       prompt | auto-approve | deny
+  ROBOT_WORKSPACE           sandbox root for file tools (default: cwd)
+  ROBOT_ENABLE_RUN_COMMAND  1 to allow destructive run_command tool
 `;
 }

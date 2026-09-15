@@ -77,6 +77,8 @@ async function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse
     approvalMode: config.approvalMode,
     skillsDir: config.skillsDir,
     routinesDir: config.routinesDir,
+    workspaceRoot: config.workspaceRoot,
+    enableRunCommand: config.enableRunCommand,
     skillsLoaded: skills.length,
     routinesLoaded: routines.length,
     ollama: ping,
@@ -101,13 +103,30 @@ async function handleRoutines(_req: http.IncomingMessage, res: http.ServerRespon
   sendJson(res, 200, { routines });
 }
 
+type ChatHistoryItem = { role?: string; content?: string };
+
 type ChatBody = {
   prompt?: string;
   dryRun?: boolean;
   skill?: string;
   routine?: string;
   maxSteps?: number;
+  /** Prior turns for multi-turn context (user/assistant). */
+  history?: ChatHistoryItem[];
 };
+
+function normalizeHistory(raw: ChatHistoryItem[] | undefined) {
+  if (!Array.isArray(raw)) return undefined;
+  return raw
+    .map((m) => ({
+      role: (m.role === 'assistant' || m.role === 'system' ? m.role : 'user') as
+        | 'user'
+        | 'assistant'
+        | 'system',
+      content: String(m.content ?? ''),
+    }))
+    .filter((m) => m.content.trim().length > 0);
+}
 
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, config: RobotConfig): Promise<void> {
   const body = await readJsonBody<ChatBody>(req);
@@ -124,6 +143,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, c
       skillName: body.skill || undefined,
       routineName: body.routine || undefined,
       maxSteps: body.maxSteps,
+      history: normalizeHistory(body.history),
     });
     sendJson(res, 200, {
       summary: result.summary,
@@ -177,6 +197,7 @@ async function handleChatStream(req: http.IncomingMessage, res: http.ServerRespo
       skillName: body.skill || undefined,
       routineName: body.routine || undefined,
       maxSteps: body.maxSteps,
+      history: normalizeHistory(body.history),
       signal: ac.signal,
       requestApproval: config.approvalMode === 'prompt' ? requestApproval : undefined,
       onEvent: (event) => {

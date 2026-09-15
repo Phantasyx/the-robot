@@ -115,6 +115,8 @@ async function cmdDoctor(): Promise<void> {
   console.log(`  approval mode:  ${config.approvalMode}`);
   console.log(`  skills dir:     ${config.skillsDir}`);
   console.log(`  routines dir:   ${config.routinesDir}`);
+  console.log(`  workspace:      ${config.workspaceRoot}`);
+  console.log(`  run_command:    ${config.enableRunCommand ? 'enabled' : 'disabled'}`);
   console.log('');
 
   const skills = await loadSkills(config.skillsDir);

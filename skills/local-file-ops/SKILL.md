@@ -21,7 +21,7 @@ You help organize files on the local machine. Prefer plans and dry-runs before w
 2. Treat delete / overwrite as **destructive** — require approval.
 3. Prefer rename/move over delete when organizing.
 4. Never touch paths outside the workspace the user named.
-5. Route filesystem tools through MCP hooks so the approval gate can see them.
+5. Prefer built-in sandboxed tools (`list_dir`, `read_file`, `write_file`) under `ROBOT_WORKSPACE`; MCP remains an extension hook.
 
 ## Steps
 

@@ -42,10 +42,14 @@ routines/        Example schedule / trigger configs
 
 `src/core/runtime.ts` owns a minimal session:
 
-1. Load config (env + defaults).
-2. Resolve skills and optional routine context.
-3. If dry-run: plan steps, print what would happen, exit.
-4. Else: call Ollama `/api/chat` (streaming when hooked), route tool requests through MCP + approvals.
+1. Load config (env + defaults), including `ROBOT_WORKSPACE` sandbox root.
+2. Resolve skills, optional routine context, and normalize conversation `history`.
+3. If dry-run: plan steps + built-in tool calls (no side effects), honor approvals, exit.
+4. Else: call Ollama `/api/chat` with history (streaming when hooked), execute sandboxed built-in tools after approvals, keep MCP as an extension stub.
+
+### Built-in tools
+
+`src/tools/` implements `list_dir`, `read_file`, `write_file`, and optional `run_command`. All file paths resolve under `workspaceRoot` and reject `..` escapes. The runtime uses a prompt heuristic to plan tool calls; write/destructive tiers go through the approval gate.
 
 ### Skills
 

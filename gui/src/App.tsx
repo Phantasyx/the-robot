@@ -13,6 +13,11 @@ import type {
   StreamEvent,
 } from './types';
 
+function shortPath(p: string): string {
+  if (p.length <= 28) return p;
+  return `…${p.slice(-26)}`;
+}
+
 function titleFromPrompt(prompt: string): string {
   const t = prompt.trim().replace(/\s+/g, ' ');
   return t.length <= 42 ? t || 'New chat' : `${t.slice(0, 41)}…`;
@@ -29,6 +34,32 @@ function formatTime(ts: number): string {
   } catch {
     return '';
   }
+}
+
+
+function buildHistory(messages: ChatMessage[]): { role: 'user' | 'assistant'; content: string }[] {
+  const out: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const m of messages) {
+    if (m.error) continue;
+    if (m.streaming) continue;
+    const content = (m.content || '').trim();
+    if (!content) continue;
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    out.push({ role: m.role, content });
+  }
+  // Keep last 20 messages for the wire payload
+  return out.slice(-20);
+}
+
+function describeToolStep(s: RunStep): string {
+  if (!s.tool) return s.message;
+  const name = s.tool.name;
+  if (s.kind === 'tool_result') {
+    const status = s.tool.ok === false ? 'fail' : 'ok';
+    return `${name} → ${status}: ${s.message}`;
+  }
+  if (s.tool.planned) return `plan ${name}: ${s.message}`;
+  return s.message;
 }
 
 function createConversation(partial?: Partial<Conversation>): Conversation {
@@ -145,6 +176,8 @@ export default function App() {
     const prompt = draft.trim();
     if (!prompt && !active.routine) return;
 
+    const history = buildHistory(active.messages);
+
     const userMsg: ChatMessage = {
       id: uid('msg'),
       role: 'user',
@@ -186,6 +219,7 @@ export default function App() {
           dryRun: active.dryRun,
           skill: active.skill || undefined,
           routine: active.routine || undefined,
+          history,
         },
         (event: StreamEvent) => {
           if (event.type === 'token') {
@@ -446,6 +480,10 @@ export default function App() {
             <span>{health?.approvalMode ?? '—'}</span>
           </div>
           <div className="status-row">
+            <span>Workspace</span>
+            <span title={health?.workspaceRoot}>{health?.workspaceRoot ? shortPath(health.workspaceRoot) : '—'}</span>
+          </div>
+          <div className="status-row">
             <span>Loaded</span>
             <span>
               {health?.skillsLoaded ?? 0} skills · {health?.routinesLoaded ?? 0} routines
@@ -495,11 +533,14 @@ export default function App() {
               </div>
               <h2>Ready when you are</h2>
               <p>
-                Dry-run plans steps offline without calling Ollama. Flip to <strong>Live</strong> when
-                Ollama is running to stream a real reply. Pick a skill or routine from the sidebar —
-                write-tier skills pause for Approve / Deny when approval mode is <code>prompt</code>.
+                Dry-run plans steps and tool calls offline without calling Ollama. Flip to{' '}
+                <strong>Live</strong> when Ollama is running to stream a reply and execute sandboxed
+                tools after Approve / Deny. Multi-turn history stays with this chat.
               </p>
               <div className="empty-tips">
+                <button type="button" className="chip" onClick={() => setDraft('list the contents of .')}>
+                  List workspace
+                </button>
                 <button type="button" className="chip" onClick={() => setDraft('summarize notes in ./notes')}>
                   Summarize notes
                 </button>
@@ -573,10 +614,20 @@ export default function App() {
                     <summary>Activity · {m.steps.length} steps</summary>
                     <div className="activity-list">
                       {m.steps.map((s) => (
-                        <div key={`${m.id}-${s.index}`} className="step">
+                        <div
+                          key={`${m.id}-${s.index}`}
+                          className={`step${s.kind === 'tool' || s.kind === 'tool_result' ? ' toolish' : ''}${s.tool?.ok === false ? ' bad' : ''}`}
+                        >
                           <span className="idx">{s.index}</span>
-                          <span className="kind">{s.kind}</span>
-                          <span className="msg">{s.message}</span>
+                          <span className={`kind kind-${s.kind}`}>{s.kind}</span>
+                          <span className="msg">
+                            {describeToolStep(s)}
+                            {s.tool?.args ? (
+                              <span className="tool-args">
+                                {JSON.stringify(s.tool.args)}
+                              </span>
+                            ) : null}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -664,9 +715,9 @@ export default function App() {
             {apiUp
               ? modeLive
                 ? ollamaUp
-                  ? 'Live streaming via local Ollama. Conversations stay in this browser.'
+                  ? 'Live streaming via local Ollama with conversation history + sandboxed tools. Chats stay in this browser.'
                   : 'Live mode needs Ollama — doctor shows it offline. Dry-run still works fully offline.'
-                : 'Dry-run is fully offline. Conversations stay in this browser (localStorage).'
+                : 'Dry-run plans tools offline and keeps multi-turn context. Conversations stay in this browser (localStorage).'
               : 'Start the API with npm run gui or npm run start:gui.'}
           </div>
         </div>
